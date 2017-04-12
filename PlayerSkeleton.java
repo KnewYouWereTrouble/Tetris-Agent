@@ -1,4 +1,5 @@
 import java.util.*;
+import java.io.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -16,17 +17,53 @@ public class PlayerSkeleton {
 	private static final int NUM_GA_TRAINING_SETS = NUM_TREES;
 	private static final int GA_TRAINING_POPULATION = (int) (INITIAL_POPULATION * 0.1);
 
+	private static final String WEIGHTS_FILE = "weights30.txt";
+
 	private Weight[] optimisedWeights;
 	private int[][] trainingFeatures;
 
 	/* GAME PARAMETERS */
 	public PlayerSkeleton() {
+		// Uncomment this to perform training
+		// performTraining();
+
+		// Uncomment this to use pre-trained weights
+		loadPreTrainedWeights();
+	}
+
+	private void loadPreTrainedWeights() {
+		try {
+			File file = new File(WEIGHTS_FILE);
+			Scanner sc = new Scanner(file);
+
+			trainingFeatures = new int[NUM_GA_TRAINING_SETS][NUM_TRAINING_FEATURES];
+			optimisedWeights = new Weight[NUM_GA_TRAINING_SETS];
+
+			for (int t = 0; t < NUM_TREES; t++) {
+				double[] weights = new double[NUM_TRAINING_FEATURES];
+				int[] features = new int[NUM_TRAINING_FEATURES];
+
+				optimisedWeights[t] = new Weight(weights);
+				optimisedWeights[t].score = sc.nextInt();
+
+				for (int f = 0; f < NUM_TRAINING_FEATURES; f++) {
+					weights[f] = sc.nextDouble();
+					features[f] = sc.nextInt();
+				}
+				trainingFeatures[t] = features;
+			}
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+		}
+	}
+
+	private void performTraining() {
 		Weight[] initialPopulation = generateRandomPopulation(INITIAL_POPULATION);
 
 		trainingFeatures = baggingFeatureSubset();
 		Weight[][] trainingPopulations = baggingPopulationSubset(initialPopulation);
 
-		optimisedWeights = new Weight[NUM_GA_TRAINING_SETS];
+		Weight[] optimisedWeights = new Weight[NUM_GA_TRAINING_SETS];
 
 		ExecutorService executor = Executors.newFixedThreadPool(4);
 		List<Future<Weight>> list = new ArrayList<Future<Weight>>();
@@ -45,6 +82,7 @@ public class PlayerSkeleton {
 			}
 		}
 		executor.shutdown();
+		this.optimisedWeights = optimisedWeights;
 	}
 
 	private int[][] baggingFeatureSubset() {
@@ -165,7 +203,7 @@ public class PlayerSkeleton {
 			s.draw();
 			s.drawNext(0,0);
 			try {
-				Thread.sleep(100);
+				Thread.sleep(25);
 			} catch (InterruptedException e) {
 				e.printStackTrace();
 			}
