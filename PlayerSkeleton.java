@@ -7,49 +7,194 @@ import java.util.concurrent.Future;
 
 public class PlayerSkeleton {
 
-	// CONSTANTS
-	private final int NUM_WEIGHTS = 4;
-	private final int NUM_POPULATION = 1000;
-	private final int FITNESS_POPULATION = 100;
-	private final int NUM_CHILDREN = 300;
-	private final int NUM_MAX_MOVES = 500;
-	private final int NUM_GAMES = 5;
-	private final int NUM_ITERATIONS = 30;
+	/* RANDOM FOREST TRAINING PARAMETERS */
+	private static final int NUM_TREES = 30;
+	private static final int NUM_FEATURES = 8;
+	private static final int NUM_TRAINING_FEATURES = 5;
 
-	private class Weight {
-		public double[] weights;
-		public int score;
+	private static final int INITIAL_POPULATION = 10000;
+	private static final int NUM_GA_TRAINING_SETS = NUM_TREES;
+	private static final int GA_TRAINING_POPULATION = (int) (INITIAL_POPULATION * 0.1);
 
-		public Weight(double[] weights) {
-			this.weights = weights;
-			score = 0;
+	private Weight[] optimisedWeights;
+	private int[][] trainingFeatures;
+
+	/* GAME PARAMETERS */
+	public PlayerSkeleton() {
+		Weight[] initialPopulation = generateRandomPopulation(INITIAL_POPULATION);
+
+		trainingFeatures = baggingFeatureSubset();
+		Weight[][] trainingPopulations = baggingPopulationSubset(initialPopulation);
+
+		optimisedWeights = new Weight[NUM_GA_TRAINING_SETS];
+
+		ExecutorService executor = Executors.newFixedThreadPool(4);
+		List<Future<Weight>> list = new ArrayList<Future<Weight>>();
+
+		for (int t = 0; t < NUM_TREES; t++) {
+			Callable<Weight> callable = new GeneticAlgorithm(trainingPopulations[t], trainingFeatures[t]);
+			Future<Weight> future = executor.submit(callable);
+			list.add(future);
 		}
+
+		for(int i = 0; i < list.size(); i++){
+			try {
+				optimisedWeights[i] = list.get(i).get();
+			} catch (InterruptedException | ExecutionException e) {
+				e.printStackTrace();
+			}
+		}
+		executor.shutdown();
 	}
 
-	private class WeightComparator implements Comparator<Weight> {
-		public int compare(Weight w1, Weight w2) {
-			return w1.score - w2.score;
+	private int[][] baggingFeatureSubset() {
+		Random r = new Random();
+
+		int[][] trainingFeatures = new int[NUM_GA_TRAINING_SETS][NUM_TRAINING_FEATURES];
+		for (int treeIdx = 0; treeIdx < NUM_GA_TRAINING_SETS; treeIdx++) {
+			trainingFeatures[treeIdx][0] = FeatureDelegate.COMPLETE_LINES_INDEX;
+			for (int fIdx = 1; fIdx < NUM_TRAINING_FEATURES; fIdx++) {
+				trainingFeatures[treeIdx][fIdx] = r.nextInt(NUM_FEATURES);
+			}
 		}
-		public boolean equals(Object obj) {
-			return this == obj;
-		}
+		return trainingFeatures;
 	}
+
+	private Weight[][] baggingPopulationSubset(Weight[] initialPopulation) {
+		Random r = new Random();
+
+		// 10 sets of 1000 weights
+		Weight[][] trainingPopulations = new Weight[NUM_GA_TRAINING_SETS][GA_TRAINING_POPULATION];
+
+		for (int treeIdx = 0; treeIdx < NUM_GA_TRAINING_SETS; treeIdx++) {
+			for (int weightIdx = 0; weightIdx < GA_TRAINING_POPULATION; weightIdx++) {
+				// random sampling with replacement - bagging
+				trainingPopulations[treeIdx][weightIdx] = new Weight(initialPopulation[r.nextInt(initialPopulation.length)].weights);
+
+				for (int f = 0; f < NUM_TRAINING_FEATURES; f++) {
+					if (trainingFeatures[treeIdx][f] == FeatureDelegate.COMPLETE_LINES_INDEX) {
+						trainingPopulations[treeIdx][weightIdx].weights[f] *= -1;
+					}
+				}
+			}
+		}
+		return trainingPopulations;
+	}
+
+	private Weight[] generateRandomPopulation(int size) {
+		Weight[] population = new Weight[size];
+		for (int p = 0; p < size; p++) {
+			double[] weights = new double[NUM_TRAINING_FEATURES];
+			for (int w = 0; w < NUM_TRAINING_FEATURES; w++) {
+				weights[w] = -Math.random();
+			}
+			population[p] = new Weight(weights);
+		}
+		return population;
+	}
+
+	public int pickMove(State s, int[][] legalMoves) {
+		int bestChoice = 0;
+		double bestScore = Double.NEGATIVE_INFINITY;
+
+		for (int choice = 0; choice < legalMoves.length; choice++) {
+			int[][] field = new int[s.getField().length][];
+			for (int i = 0; i < field.length; i++)
+				field[i] = s.getField()[i].clone();
+
+			int orient = legalMoves[choice][0];
+			int slot = legalMoves[choice][1];
+
+			// height if the first column makes contact
+			int height = s.getTop()[slot] - State.getpBottom()[s.getNextPiece()][orient][0];
+				// for each column beyond the first in the piece
+			for (int c = 1; c < State.getpWidth()[s.getNextPiece()][orient]; c++) {
+				height = Math.max(height, s.getTop()[slot + c] - State.getpBottom()[s.getNextPiece()][orient][c]);
+			}
+
+			// for each column in the piece - fill in the appropriate blocks
+			for (int i = 0; i < State.getpWidth()[s.getNextPiece()][orient]; i++) {
+				// from bottom to top of brick
+				for (int h = height + State.getpBottom()[s.getNextPiece()][orient][i]; h < height
+					 + State.getpTop()[s.getNextPiece()][orient][i]; h++) {
+						 if (!(h >= field.length))
+							field[h][i + slot] = s.getTurnNumber();
+				}
+			}
+
+			double score = ensembleEvaluate(field);
+			if (score > bestScore) {
+				bestScore = score;
+				bestChoice = choice;
+			}
+		}
+		return bestChoice;
+	}
+
+	private double ensembleEvaluate(int[][] field) {
+		FeatureDelegate fd = new FeatureDelegate();
+		int totalWeightsScore = weightsScore(optimisedWeights);
+
+		double totalScore = 0;
+		for (int tree = 0; tree < NUM_TREES; tree++) {
+			double score = 0;
+			for (int f = 0; f < NUM_TRAINING_FEATURES; f++) {
+				score += optimisedWeights[tree].weights[f] * fd.applyFeature(field, trainingFeatures[tree][f]);
+			}
+			double votePercentage = optimisedWeights[tree].score / (double) totalWeightsScore;
+			totalScore += score * votePercentage;
+		}
+		return totalScore;
+	}
+
+	private int weightsScore(Weight[] weights) {
+		int totalWeightsScore = 0;
+		for (int w = 0; w < NUM_TREES; w++) {
+			totalWeightsScore += weights[w].score;
+		}
+		return totalWeightsScore;
+	}
+
+	public static void main(String[] args) {
+		State s = new State();
+		new TFrame(s);
+		PlayerSkeleton p = new PlayerSkeleton();
+
+		while(!s.hasLost()) {
+			s.makeMove(p.pickMove(s,s.legalMoves()));
+			s.draw();
+			s.drawNext(0,0);
+			try {
+				Thread.sleep(100);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+		}
+		System.out.println("You have completed " + s.getRowsCleared() + " rows.");
+	}
+}
+
+class GeneticAlgorithm implements Callable<Weight> {
 
 	private class EvaluateWeightTask implements Callable<Integer> {
-		private Weight weight;
+		private static final int NUM_GAMES = 5;
 
-		public EvaluateWeightTask(Weight weight) {
+		private Weight weight;
+		private int[] features;
+
+		public EvaluateWeightTask(Weight weight, int[] features) {
 			this.weight = weight;
+			this.features = features;
 		}
 
 		@Override
 	    public Integer call() throws Exception {
-			ExecutorService executor = Executors.newFixedThreadPool(10);
+			ExecutorService executor = Executors.newFixedThreadPool(NUM_GAMES);
 			List<Future<Integer>> list = new ArrayList<Future<Integer>>();
 
 
 			for (int g = 0; g < NUM_GAMES; g++) {
-				Callable<Integer> callable = new PlayGameTask(weight);
+				Callable<Integer> callable = new PlayGameTask(weight, features);
 				Future<Integer> future = executor.submit(callable);
 				list.add(future);
 			}
@@ -68,30 +213,35 @@ public class PlayerSkeleton {
 	}
 
 	private class PlayGameTask implements Callable<Integer> {
-		private Weight weight;
+		private static final int MAX_MOVES_PER_GAME = 500;
 
-		public PlayGameTask(Weight weight) {
+		private Weight weight;
+		private int[] features;
+		private FeatureDelegate fd;
+
+		public PlayGameTask(Weight weight, int[] features) {
 			this.weight = weight;
+			this.features = features;
+			this.fd = new FeatureDelegate();
 		}
 
 		@Override
 	    public Integer call() throws Exception {
-			return playForFitness(weight);
+			return fitnessFunction(weight);
 	    }
 
-		private int playForFitness(Weight weight) {
+		private int fitnessFunction(Weight weight) {
 			State s = new State();
 			int numMoves = 0;
 
-			while(!s.hasLost() && numMoves < NUM_MAX_MOVES) {
-				s.makeMove(this.pickMoveFitness(s, s.legalMoves(), weight));
+			while(!s.hasLost() && numMoves < MAX_MOVES_PER_GAME) {
+				s.makeMove(this.pickMove(s, s.legalMoves(), weight));
 				numMoves++;
 			}
 			return s.getRowsCleared();
 		}
 
-		//implement this function to have a working system
-		private int pickMoveFitness(State s, int[][] legalMoves, Weight weight) {
+		private int pickMove(State s, int[][] legalMoves, Weight weight) {
 			int bestChoice = 0;
 			double bestScore = Double.NEGATIVE_INFINITY;
 
@@ -120,7 +270,7 @@ public class PlayerSkeleton {
 					}
 				}
 
-				double score = evaluate(weight.weights, field);
+				double score = evaluate(weight.weights, features, field);
 				if (score > bestScore) {
 					bestScore = score;
 					bestChoice = choice;
@@ -128,35 +278,196 @@ public class PlayerSkeleton {
 			}
 			return bestChoice;
 		}
+
+		private double evaluate(double[] weights, int[] features, int[][] field) {
+			double score = 0;
+			for (int fIdx = 0; fIdx < features.length; fIdx++) {
+				score += fd.applyFeature(field, features[fIdx]) * weights[fIdx];
+			}
+			return score;
+		 }
 	}
 
+	private static final double CHILDREN_SIZE_PERCENTAGE = 0.3;
+	private static final double TOURNAMENT_SIZE_PERCENTAGE = 0.1;
+	private static final int NUM_GENERATIONS = 50;
+	private static final double MUTAION_PROBABILITY = 0.05;
+	private static final double MUTAION_MAGNITUDE = 0.2;
 
-	private double[] weights = new double[NUM_WEIGHTS];
+	private Weight[] population;
+	private int[] features;
 
-	public static void main(String[] args) {
-		PlayerSkeleton p = new PlayerSkeleton();
+	public GeneticAlgorithm(Weight[] population, int[] features) {
+		this.population = population;
+		this.features = features;
 	}
 
-	public PlayerSkeleton() {
-		Weight w = geneticLearning();
-		System.out.println(w.weights[0]);
-		System.out.println(w.weights[1]);
-		System.out.println(w.weights[2]);
-		System.out.println(w.weights[3]);
+	@Override
+	public Weight call() throws Exception {
+		return learn();
 	}
 
-	//implement this function to have a working system
-	public int pickMove(State s, int[][] legalMoves) {
+	// This will return the optimised weights after GA
+	private Weight learn() {
+		applyFitnessFunction(population, features);
+		Weight[] childrenPopulation = new Weight[(int) (population.length * CHILDREN_SIZE_PERCENTAGE)];
+
+		for (int g = 0; g < NUM_GENERATIONS; g++) {
+			for (int c = 0; c < childrenPopulation.length; c++) {
+				Weight[] tournamentPopulation = baggingTournamentSubset(population);
+				Arrays.sort(tournamentPopulation, new WeightComparator());
+
+				//Perform crossover
+				Weight crossover = weightedAvgCrossover(tournamentPopulation[tournamentPopulation.length - 1],
+														tournamentPopulation[tournamentPopulation.length - 2]);
+				//Perform mutation
+				mutate(crossover);
+				normalise(crossover);
+				childrenPopulation[c] = crossover;
+			}
+			applyFitnessFunction(childrenPopulation, features);
+			replaceLastN(population, childrenPopulation);
+		}
+
+		System.out.println(population[population.length - 1].score);
+
+		for (int w = 0; w < features.length; w++) {
+			System.out.print(population[population.length - 1].weights[w] + " " + features[w]);
+			System.out.println();
+		}
+
+		return population[population.length - 1];
+	}
+
+	private void applyFitnessFunction(Weight[] population, int[] features) {
+		ExecutorService executor = Executors.newFixedThreadPool(30);
+		List<Future<Integer>> list = new ArrayList<Future<Integer>>();
+
+		for (int w = 0; w < population.length; w++) {
+			Callable<Integer> callable = new EvaluateWeightTask(population[w], features);
+			Future<Integer> future = executor.submit(callable);
+			list.add(future);
+		}
+
+		for(int w = 0; w < list.size(); w++){
+			try {
+				population[w].score = list.get(w).get();
+			} catch (InterruptedException | ExecutionException e) {
+				e.printStackTrace();
+			}
+		}
+		executor.shutdown();
+	}
+
+	private Weight weightedAvgCrossover(Weight fittest, Weight secondFittest) {
+		double[] crossover = new double[fittest.weights.length];
+
+		for (int w = 0; w < fittest.weights.length; w++) {
+			crossover[w] = fittest.weights[w] * fittest.score
+						 + secondFittest.weights[w] * secondFittest.score;
+		}
+		return new Weight(crossover);
+	}
+
+	private void mutate(Weight crossover) {
+		if(Math.random() < MUTAION_PROBABILITY) {
+			Random r = new Random();
+			int component = r.nextInt(crossover.weights.length);
+			if (Math.random() < 0.5) {
+				crossover.weights[component] *= 1 + MUTAION_MAGNITUDE;
+			} else {
+				crossover.weights[component] *= 1 - MUTAION_MAGNITUDE;
+			}
+		}
+	}
+
+	private void normalise(Weight crossover) {
+		double total = 0;
+		for (int i = 0; i < crossover.weights.length; i++) {
+			total += Math.pow(crossover.weights[i], 2);
+		}
+		total = Math.sqrt(total);
+
+		for (int j = 0; j < crossover.weights.length; j++) {
+			crossover.weights[j] /= total;
+		}
+	}
+
+	private void replaceLastN(Weight[] population, Weight[] childrenPopulation) {
+		Arrays.sort(population, new WeightComparator());
+		for (int r = 0; r < childrenPopulation.length; r++) {
+			population[r + population.length - childrenPopulation.length] = childrenPopulation[r];
+		}
+	}
+
+	private Weight[] baggingTournamentSubset(Weight[] population) {
+		Random r = new Random();
+
+		Weight[] tournamentPopulation = new Weight[(int) (population.length * TOURNAMENT_SIZE_PERCENTAGE)];
+
+		for (int idx = 0; idx < tournamentPopulation.length; idx++) {
+			tournamentPopulation[idx] = population[r.nextInt(population.length)];
+		}
+		return tournamentPopulation;
+	}
+
+}
+
+
+class FeatureDelegate {
+	public static final int COMPLETE_LINES_INDEX = 3;
+
+	public int applyFeature(int[][] field, int feature) {
+		switch (feature) {
+			case 0:
+			return aggregateHeight(field);
+
+			case 1:
+			return avgHeight(field);
+
+			case 2:
+			return maxMinHeightDiff(field);
+
+			case 3:
+			return numCompleteLines(field);
+
+			case 4:
+			return numHoles(field);
+
+			case 5:
+			return totalBlocks(field);
+
+			case 6:
+			return heightVariance(field);
+
+			case 7:
+			return bumpiness(field);
+		}
 		return 0;
 	}
 
-	/* FEATURES */
 	private int aggregateHeight(int[][] field) {
 		int aggregateHeight = 0;
 		for (int c = 0; c < field[0].length; c++) {
 			aggregateHeight += getColumnHeight(c, field);
 		}
 		return aggregateHeight;
+	}
+
+	private int avgHeight(int[][] field) {
+		return aggregateHeight(field) / State.COLS;
+	}
+
+	private int maxMinHeightDiff(int[][] field) {
+		int max = getColumnHeight(0, field);
+		int min = getColumnHeight(0, field);
+
+		for (int c = 0; c < State.COLS; c++) {
+			int height = getColumnHeight(c, field);
+			if (height > max) max = height;
+			if (height < min) min = height;
+		}
+		return Math.abs(max - min);
 	}
 
 	private int numCompleteLines(int[][] field) {
@@ -187,6 +498,26 @@ public class PlayerSkeleton {
 		return numHoles;
 	}
 
+	private int totalBlocks(int[][] field) {
+		int count = 0;
+		for (int r = 0; r < State.ROWS; r++) {
+			for (int c = 0; c < State.COLS; c++) {
+				if (field[r][c] != 0) count++;
+			}
+		}
+		return count;
+	}
+
+	private int heightVariance(int[][] field) {
+		int avgHeight = avgHeight(field);
+		int sum = 0;
+		for (int c = 0; c < field[0].length; c++) {
+			int columnHeight = getColumnHeight(c, field);
+			sum += (columnHeight - avgHeight) * (columnHeight - avgHeight);
+		}
+		return sum / State.COLS;
+	}
+
 	private int bumpiness(int[][] field) {
 		int bumpiness = 0;
 
@@ -205,151 +536,24 @@ public class PlayerSkeleton {
 		return 0;
 	}
 
-	/* SCORE FUNCTION */
-	private double evaluate(double[] weights, int[][] field) {
-		int aggregateHeight = aggregateHeight(field);
-		int numCompleteLines = numCompleteLines(field);
-		int numHoles = numHoles(field);
-		int bumpiness = bumpiness(field);
+}
 
-		return weights[0] * aggregateHeight + weights[1] * numCompleteLines
-			 + weights[2] * numHoles + weights[3] * bumpiness;
+class Weight {
+	public double[] weights;
+	public int score;
+
+	public Weight(double[] weights) {
+		this.weights = weights;
+		score = 0;
+	}
+}
+
+class WeightComparator implements Comparator<Weight> {
+	public int compare(Weight w1, Weight w2) {
+		return w1.score - w2.score;
 	}
 
-	/* HELPER FUNCTIONS */
-	private void printField(int[][] field) {
-		for (int i = field.length - 1; i >= 0; i--) {
-			for (int j = 0; j < field[0].length; j++) {
-				System.out.print(field[i][j]);
-			}
-			System.out.println();
-		}
-		System.out.println();
-	}
-
-
-
-	/* GENETIC ALGORITHM */
-	private Weight geneticLearning() {
-		Weight[] population = new Weight[NUM_POPULATION];
-		initPopulation(population);
-
-		for (int i = 0; i < NUM_ITERATIONS; i++) {
-			Weight[] childrenPopulation = new Weight[NUM_CHILDREN];
-
-			for (int c = 0; c < childrenPopulation.length; c++) {
-				System.out.println("I " + i + " C " + c);
-				// Fitness for 10% of population
-				Weight[] fitnessPopulation = new Weight[FITNESS_POPULATION];
-				initFitnessPopulation(population, fitnessPopulation);
-
-				runFitnessOnPopulation(fitnessPopulation);
-				Arrays.sort(fitnessPopulation, new WeightComparator());
-
-				//Perform crossover
-				Weight crossover = weightedAvgCrossover(fitnessPopulation[fitnessPopulation.length - 1],
-														fitnessPopulation[fitnessPopulation.length - 2]);
-				//Perform mutation
-				mutate(crossover);
-				normalise(crossover);
-				childrenPopulation[c] = crossover;
-			}
-
-			replaceLastN(population, childrenPopulation);
-			clearPopulationScore(population);
-		}
-
-		runFitnessOnPopulation(population);
-		Arrays.sort(population, new WeightComparator());
-		System.out.println(population[population.length - 1].score);
-		return population[population.length - 1];
-	}
-
-	// Evaluate fitness function
-	private void runFitnessOnPopulation(Weight[] population) {
-		ExecutorService executor = Executors.newFixedThreadPool(population.length);
-		List<Future<Integer>> list = new ArrayList<Future<Integer>>();
-
-		for (int w = 0; w < population.length; w++) {
-			Callable<Integer> callable = new EvaluateWeightTask(population[w]);
-			Future<Integer> future = executor.submit(callable);
-			list.add(future);
-		}
-
-		for(int w = 0; w < list.size(); w++){
-			try {
-				population[w].score = list.get(w).get();
-			} catch (InterruptedException | ExecutionException e) {
-				e.printStackTrace();
-			}
-		}
-		executor.shutdown();
-	}
-
-	private void initPopulation(Weight[] population) {
-		for (int i=0; i < NUM_POPULATION; i++) {
-			double[] weights = new double[NUM_WEIGHTS];
-			weights[0] = -Math.random();
-			weights[1] = Math.random();
-			weights[2] = -Math.random();
-			weights[3] = -Math.random();
-			population[i] = new Weight(weights);
-		}
-	}
-
-	private void initFitnessPopulation(Weight[] population, Weight[] fitnessPopulation) {
-		Random r = new Random();
-		for (int i=0; i < fitnessPopulation.length; i++) {
-			fitnessPopulation[i] = population[r.nextInt(population.length)];
-		}
-	}
-
-	private void clearPopulationScore(Weight[] population) {
-		for (int w = 0; w < population.length; w++) {
-			population[w].score = 0;
-		}
-	}
-
-	private void replaceLastN(Weight[] population, Weight[] childrenPopulation) {
-		runFitnessOnPopulation(population);
-		Arrays.sort(population, new WeightComparator());
-
-		for (int r = 0; r < childrenPopulation.length; r++) {
-			population[r + population.length - childrenPopulation.length] = childrenPopulation[r];
-		}
-	}
-
-	private Weight weightedAvgCrossover(Weight fittest, Weight secondFittest) {
-		double[] crossover = new double[NUM_WEIGHTS];
-
-		for (int w = 0; w < NUM_WEIGHTS; w++) {
-			crossover[w] = fittest.weights[w] * fittest.score
-						 + secondFittest.weights[w] * secondFittest.score;
-		}
-		return new Weight(crossover);
-	}
-
-	private void mutate(Weight crossover) {
-		if(Math.random() < 0.05) {
-			Random r = new Random();
-			int component = r.nextInt(NUM_WEIGHTS);
-			if (Math.random() < 0.5) {
-				crossover.weights[component] *= 1.2;
-			} else {
-				crossover.weights[component] *= 0.8;
-			}
-		}
-	}
-
-	private void normalise(Weight crossover) {
-		double total = 0;
-		for (int i = 0; i < NUM_WEIGHTS; i++) {
-			total += Math.pow(crossover.weights[i], 2);
-		}
-		total = Math.sqrt(total);
-
-		for (int j = 0; j < NUM_WEIGHTS; j++) {
-			crossover.weights[j] /= total;
-		}
+	public boolean equals(Object obj) {
+		return this == obj;
 	}
 }
