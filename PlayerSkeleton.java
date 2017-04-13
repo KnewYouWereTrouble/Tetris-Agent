@@ -9,15 +9,15 @@ import java.util.concurrent.Future;
 public class PlayerSkeleton {
 
 	/* RANDOM FOREST TRAINING PARAMETERS */
-	private static final int NUM_TREES = 30;
-	private static final int NUM_FEATURES = 8;
-	private static final int NUM_TRAINING_FEATURES = 5;
+	private static final int NUM_TREES = 40;
+	private static final int NUM_FEATURES = FeatureDelegate.NUM_FEATURES;
+	private static final int NUM_TRAINING_FEATURES = 6;
 
 	private static final int INITIAL_POPULATION = 10000;
 	private static final int NUM_GA_TRAINING_SETS = NUM_TREES;
 	private static final int GA_TRAINING_POPULATION = (int) (INITIAL_POPULATION * 0.1);
 
-	private static final String WEIGHTS_FILE = "weights30.txt";
+	private static final String WEIGHTS_FILE = "weights" + NUM_TREES + ".txt";
 
 	private Weight[] optimisedWeights;
 	private int[][] trainingFeatures;
@@ -203,7 +203,7 @@ public class PlayerSkeleton {
 			s.draw();
 			s.drawNext(0,0);
 			try {
-				Thread.sleep(25);
+				Thread.sleep(10);
 			} catch (InterruptedException e) {
 				e.printStackTrace();
 			}
@@ -327,7 +327,7 @@ class GeneticAlgorithm implements Callable<Weight> {
 	}
 
 	private static final double CHILDREN_SIZE_PERCENTAGE = 0.3;
-	private static final double TOURNAMENT_SIZE_PERCENTAGE = 0.1;
+	private static final double TOURNAMENT_SIZE_PERCENTAGE = 0.2;
 	private static final int NUM_GENERATIONS = 50;
 	private static final double MUTAION_PROBABILITY = 0.05;
 	private static final double MUTAION_MAGNITUDE = 0.2;
@@ -367,6 +367,7 @@ class GeneticAlgorithm implements Callable<Weight> {
 			replaceLastN(population, childrenPopulation);
 		}
 
+		applyFitnessFunction(population, features);
 		System.out.println(population[population.length - 1].score);
 
 		for (int w = 0; w < features.length; w++) {
@@ -453,6 +454,7 @@ class GeneticAlgorithm implements Callable<Weight> {
 
 
 class FeatureDelegate {
+	public static final int NUM_FEATURES = 9;
 	public static final int COMPLETE_LINES_INDEX = 3;
 
 	public int applyFeature(int[][] field, int feature) {
@@ -480,6 +482,9 @@ class FeatureDelegate {
 
 			case 7:
 			return bumpiness(field);
+
+			case 8:
+			return blockades(field);
 		}
 		return 0;
 	}
@@ -567,9 +572,24 @@ class FeatureDelegate {
 		return bumpiness;
 	}
 
+	private int blockades(int[][] field) {
+		int bloackades = 0;
+
+		for (int c = 0; c < field[0].length - 1; c++) {
+			int columnHeightCurrent = getColumnHeight(c, field);
+			for (int b = 0; b < columnHeightCurrent; b++) {
+				if (field[b][c] == 0) {
+					bloackades += columnHeightCurrent - b;
+					break;
+				}
+			}
+		}
+		return bloackades;
+	}
+
 	private int getColumnHeight(int col, int[][] field) {
 		for (int i = field.length - 1; i >= 0; i--) {
-			if (field[i][col] != 0) return i;
+			if (field[i][col] != 0) return i + 1;
 		}
 		return 0;
 	}
