@@ -9,7 +9,7 @@ import java.util.concurrent.Future;
 class Constants {
 
 	/* RANDOM FOREST TRAINING PARAMETERS */
-	public static final int NUM_TREES = 40;
+	public static final int NUM_TREES = 80;
 	public static final int NUM_FEATURES = 9;
 	public static final int NUM_TRAINING_FEATURES = 6;
 
@@ -49,7 +49,7 @@ public class PlayerSkeleton {
 		// performTraining();
 
 		// Uncomment this to use pre-trained weights
-		//loadPreTrainedWeights();
+		loadPreTrainedWeights();
 	}
 
 	/**
@@ -233,21 +233,27 @@ public class PlayerSkeleton {
 	}
 
 	public static void main(String[] args) {
-		State s = new State();
-		new TFrame(s);
+		// new TFrame(s);
 		PlayerSkeleton p = new PlayerSkeleton();
 
-		while(!s.hasLost()) {
-			s.makeMove(p.pickMove(s,s.legalMoves()));
-			s.draw();
-			s.drawNext(0,0);
-			try {
-				Thread.sleep(10);
-			} catch (InterruptedException e) {
-				e.printStackTrace();
+		int totalLines = 0;
+		for (int i = 0; i < 100; i++) {
+			State s = new State();
+			while(!s.hasLost()) {
+				s.makeMove(p.pickMove(s,s.legalMoves()));
+				/*
+				s.draw();
+				s.drawNext(0,0);
+				try {
+					Thread.sleep(10);
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				}*/
 			}
+			totalLines += s.getRowsCleared();
+			System.out.println(s.getRowsCleared());
 		}
-		System.out.println("You have completed " + s.getRowsCleared() + " rows.");
+		System.out.println(totalLines / 100);
 	}
 }
 
